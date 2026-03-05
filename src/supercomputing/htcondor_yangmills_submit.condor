@@ -1,0 +1,11 @@
+executable     = src/supercomputing/htcondor_wrapper.sh
+universe       = vanilla
+output         = logs/ym_$(Process).out
+error          = logs/ym_$(Process).err
+log            = logs/ym_$(Process).log
+arguments      = $(Process)
+request_cpus   = 4
+request_memory = 8GB
+notification   = Error
+environment    = "PYTHONPATH=/srv/home/gahenax/Gahenax-Yang-Mills"
+queue 100
