@@ -74,7 +74,7 @@ def average_wilson_loop(lattice: LatticeGauge, R: int, T: int,
     for origin in origins:
         total += wilson_loop(lattice, origin, R, T, mu, nu)
 
-    return total / len(list(origins))
+    return total / len(origins)
 
 
 def creutz_ratio(W_R_T: float, W_R1_T: float,
@@ -85,8 +85,6 @@ def creutz_ratio(W_R_T: float, W_R1_T: float,
     Extracts the string tension sigma in the limit of large R,T.
     If chi > 0 and roughly constant, confinement (mass gap) is present.
     """
-    if W_R_T1 <= 0 or W_R1_T <= 0:
-        return float('nan')
     numerator = W_R_T * W_R1_T1
     denominator = W_R_T1 * W_R1_T
     if denominator <= 0 or numerator <= 0:

@@ -51,9 +51,10 @@ class MassGapDetector:
         from lattice_gauge import LatticeGauge
 
         results = {}
-        for label, b in [("center", beta), ("plus", beta + delta_beta),
-                         ("minus", beta - delta_beta)]:
-            lat = LatticeGauge(self.N, self.dim, beta=b, seed=self.seed)
+        for i, (label, b) in enumerate([("center", beta),
+                                         ("plus", beta + delta_beta),
+                                         ("minus", beta - delta_beta)]):
+            lat = LatticeGauge(self.N, self.dim, beta=b, seed=self.seed + i)
             lat.thermalize(n_sweeps=n_sweeps)
             results[label] = lat.average_plaquette()
 
@@ -67,7 +68,7 @@ class MassGapDetector:
         from lattice_gauge import LatticeGauge
         from wilson_loop import static_potential, detect_confinement
 
-        lat = LatticeGauge(self.N, self.dim, beta=beta, seed=self.seed)
+        lat = LatticeGauge(self.N, self.dim, beta=beta, seed=self.seed + 3)
         lat.thermalize(n_sweeps=n_sweeps)
         pot = static_potential(lat, R_max=R_max, T=T)
         return detect_confinement(pot, threshold=self.sigma_threshold)

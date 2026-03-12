@@ -69,11 +69,27 @@ class LatticeGauge:
         self.n_links = self.n_sites * dim
         self.rng = np.random.default_rng(seed)
 
-        # Initialize all links to identity (cold start)
+        # Initialize all links to identity (cold start) -- vectorized
         self.links = np.zeros((self.n_sites, dim, 2, 2), dtype=complex)
-        for i in range(self.n_sites):
-            for mu in range(dim):
-                self.links[i, mu] = np.eye(2, dtype=complex)
+        self.links[:, :, 0, 0] = 1.0
+        self.links[:, :, 1, 1] = 1.0
+
+        # Precompute neighbor table for O(1) lookup during sweeps
+        self._neighbors = self._build_neighbor_table()
+
+    def _build_neighbor_table(self) -> np.ndarray:
+        """Precompute neighbor[site, mu, dir]: dir=0 forward (+1), dir=1 backward (-1)."""
+        table = np.empty((self.n_sites, self.dim, 2), dtype=np.intp)
+        for site in range(self.n_sites):
+            coords = list(self.site_to_coords(site))
+            for mu in range(self.dim):
+                fwd = coords.copy()
+                fwd[mu] = (fwd[mu] + 1) % self.N
+                bwd = coords.copy()
+                bwd[mu] = (bwd[mu] - 1) % self.N
+                table[site, mu, 0] = self.coords_to_site(tuple(fwd))
+                table[site, mu, 1] = self.coords_to_site(tuple(bwd))
+        return table
 
     def site_to_coords(self, idx: int) -> Tuple:
         """Convert flat index to lattice coordinates."""
@@ -94,9 +110,7 @@ class LatticeGauge:
 
     def neighbor(self, site: int, mu: int, direction: int = 1) -> int:
         """Get neighbor site in direction mu (+1 or -1), periodic BC."""
-        coords = list(self.site_to_coords(site))
-        coords[mu] = (coords[mu] + direction) % self.N
-        return self.coords_to_site(tuple(coords))
+        return int(self._neighbors[site, mu, 0 if direction == 1 else 1])
 
     def get_link(self, site: int, mu: int) -> np.ndarray:
         """Get U_mu(site)."""
@@ -123,25 +137,37 @@ class LatticeGauge:
     def plaquette_action(self) -> float:
         """
         Wilson gauge action: S = beta * sum_{P} (1 - Re Tr(U_P) / 2).
+        Vectorized over all lattice sites simultaneously.
         """
         action = 0.0
-        for site in range(self.n_sites):
-            for mu in range(self.dim):
-                for nu in range(mu + 1, self.dim):
-                    P = self.plaquette(site, mu, nu)
-                    action += 1.0 - su2_trace(P)
+        for mu in range(self.dim):
+            for nu in range(mu + 1, self.dim):
+                x_mu = self._neighbors[:, mu, 0]
+                x_nu = self._neighbors[:, nu, 0]
+                P = (self.links[:, mu]
+                     @ self.links[x_mu, nu]
+                     @ self.links[x_nu, mu].conj().swapaxes(-1, -2)
+                     @ self.links[:, nu].conj().swapaxes(-1, -2))
+                traces = np.real(P[:, 0, 0] + P[:, 1, 1]) / 2.0
+                action += (1.0 - traces).sum()
         return self.beta * action
 
     def average_plaquette(self) -> float:
-        """Average plaquette value (1 = ordered, 0 = disordered)."""
+        """Average plaquette value (1 = ordered, 0 = disordered). Vectorized over all sites."""
         total = 0.0
-        count = 0
-        for site in range(self.n_sites):
-            for mu in range(self.dim):
-                for nu in range(mu + 1, self.dim):
-                    P = self.plaquette(site, mu, nu)
-                    total += su2_trace(P)
-                    count += 1
+        n_planes = 0
+        for mu in range(self.dim):
+            for nu in range(mu + 1, self.dim):
+                x_mu = self._neighbors[:, mu, 0]
+                x_nu = self._neighbors[:, nu, 0]
+                P = (self.links[:, mu]
+                     @ self.links[x_mu, nu]
+                     @ self.links[x_nu, mu].conj().swapaxes(-1, -2)
+                     @ self.links[:, nu].conj().swapaxes(-1, -2))
+                traces = np.real(P[:, 0, 0] + P[:, 1, 1]) / 2.0
+                total += traces.sum()
+                n_planes += 1
+        count = n_planes * self.n_sites
         return total / count if count > 0 else 0.0
 
     def staple(self, site: int, mu: int) -> np.ndarray:
@@ -205,7 +231,20 @@ class LatticeGauge:
                 print(f"  Sweep {i+1}/{n_sweeps}: plaq={plaq:.4f}, acc={acc:.2%}")
 
     def hot_start(self) -> None:
-        """Initialize all links to random Haar SU(2) matrices."""
-        for i in range(self.n_sites):
-            for mu in range(self.dim):
-                self.links[i, mu] = haar_su2(self.rng)
+        """Initialize all links to random Haar SU(2) matrices. Vectorized."""
+        n = self.n_sites * self.dim
+        r = self.rng.normal(size=(n, 3)) * np.pi
+        r_norms = np.linalg.norm(r, axis=1)
+        tiny = r_norms < 1e-15
+        r_norms_safe = np.where(tiny, 1.0, r_norms)
+        c = np.cos(r_norms_safe)
+        s = np.sin(r_norms_safe)
+        n_hat = r / r_norms_safe[:, np.newaxis]
+
+        mats = np.empty((n, 2, 2), dtype=complex)
+        mats[:, 0, 0] = c + 1j * s * n_hat[:, 2]
+        mats[:, 0, 1] = 1j * s * (n_hat[:, 0] - 1j * n_hat[:, 1])
+        mats[:, 1, 0] = 1j * s * (n_hat[:, 0] + 1j * n_hat[:, 1])
+        mats[:, 1, 1] = c - 1j * s * n_hat[:, 2]
+        mats[tiny] = np.eye(2, dtype=complex)
+        self.links[:] = mats.reshape(self.n_sites, self.dim, 2, 2)
