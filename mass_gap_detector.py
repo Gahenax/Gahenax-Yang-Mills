@@ -21,6 +21,10 @@ class MassGapVerdict:
     confinement: bool
     verdict: str  # "CONFINED" | "COULOMB" | "TRANSITIONAL"
     details: str
+    plaquette_error: float = 0.0   # bootstrap std of average plaquette
+    sigma_error: float = 0.0       # bootstrap std of string tension
+    tau_int: float = 0.0           # integrated autocorrelation time
+    n_eff: int = 0                 # effective independent samples
 
 
 class MassGapDetector:

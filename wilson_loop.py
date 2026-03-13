@@ -166,3 +166,87 @@ def detect_confinement(potential: List[Tuple[int, float]],
         "confinement": confinement,
         "verdict": verdict,
     }
+
+
+def polyakov_loop(lattice: LatticeGauge, origin: int,
+                  direction: int = 0) -> complex:
+    """
+    Compute the Polyakov loop L(x) at a spatial site.
+
+    L(x) = Tr( ∏_{t=0}^{N-1} U_direction(x + t*direction) ) / 2
+
+    Wraps around the periodic boundary exactly once in `direction`.
+    Returns a complex number; |L| is the order parameter for deconfinement.
+
+    Parameters
+    ----------
+    origin    : starting site (temporal coordinate is ignored — the loop
+                always starts at t=0 of that spatial position)
+    direction : which lattice direction to wind around (default 0 = time)
+    """
+    # Rewind origin to temporal coordinate 0 in `direction`
+    coords = list(lattice.site_to_coords(origin))
+    coords[direction] = 0
+    site = lattice.coords_to_site(tuple(coords))
+
+    P = np.eye(2, dtype=complex)
+    for _ in range(lattice.N):
+        P = P @ lattice.get_link(site, direction)
+        site = lattice.neighbor(site, direction)
+    return complex(np.trace(P)) / 2.0
+
+
+def average_polyakov_loop(lattice: LatticeGauge,
+                           direction: int = 0) -> float:
+    """
+    |<L>| averaged over all spatial sites (sites with t-coord = 0).
+
+    = 0  in the confined phase  (Z_2 center symmetry intact)
+    > 0  in the deconfined phase (center symmetry spontaneously broken)
+
+    Complements Wilson loops as an independent order parameter.
+    """
+    coords_template = [0] * lattice.dim
+    total = 0.0
+    n_spatial = lattice.N ** (lattice.dim - 1)
+    # Iterate over all spatial coordinates (all dims except `direction`)
+    spatial_dims = [d for d in range(lattice.dim) if d != direction]
+    for flat in range(n_spatial):
+        coords = coords_template.copy()
+        tmp = flat
+        for d in spatial_dims:
+            coords[d] = tmp % lattice.N
+            tmp //= lattice.N
+        site = lattice.coords_to_site(tuple(coords))
+        total += abs(polyakov_loop(lattice, site, direction))
+    return total / n_spatial
+
+
+def topological_charge(lattice: LatticeGauge) -> float:
+    """
+    Naive lattice topological charge Q (Pontryagin number).
+
+    For a 4D SU(2) gauge field:
+        Q = (1/8π²) Σ_x [ Im Tr(P_{01} P_{23})
+                         + Im Tr(P_{02} P_{31})
+                         + Im Tr(P_{03} P_{12}) ]
+
+    where P_{μν}(x) is the full 2×2 plaquette matrix. Q is an integer
+    for smooth configurations and measures the topological sector of the
+    vacuum. Only meaningful for dim >= 4.
+
+    Returns float('nan') if dim < 4.
+    """
+    if lattice.dim < 4:
+        return float('nan')
+
+    # The 3 dual plane pairs in 4D: (01,23), (02,31), (03,12)
+    dual_pairs = [(0, 1, 2, 3), (0, 2, 3, 1), (0, 3, 1, 2)]
+    total = 0.0
+    for mu, nu, rho, sigma in dual_pairs:
+        for site in range(lattice.n_sites):
+            P_munu = lattice.plaquette(site, mu, nu)
+            P_rhosigma = lattice.plaquette(site, rho, sigma)
+            total += float(np.imag(np.trace(P_munu @ P_rhosigma)))
+
+    return total / (8.0 * np.pi ** 2)

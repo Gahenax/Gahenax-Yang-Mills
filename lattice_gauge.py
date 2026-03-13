@@ -5,7 +5,7 @@ Pure Python + numpy implementation for generating gauge field configurations
 via Metropolis-Hastings heatbath sweeps.
 """
 import numpy as np
-from typing import Tuple, Optional
+from typing import Callable, Tuple, Optional
 
 
 # -- SU(2) matrix utilities --
@@ -41,6 +41,23 @@ def haar_su2(rng: np.random.Generator) -> np.ndarray:
     return random_su2(rng, epsilon=np.pi)
 
 
+def project_su2(M: np.ndarray) -> np.ndarray:
+    """
+    Project a 2x2 complex matrix to the nearest SU(2) element.
+
+    Any SU(2) matrix has the form [[a, b], [-b*, a*]] with |a|²+|b|²=1.
+    We extract (a, b) from M via the SU(2) structure and normalize.
+    """
+    a = (M[0, 0] + M[1, 1].conj()) / 2.0
+    b = (M[0, 1] - M[1, 0].conj()) / 2.0
+    norm = np.sqrt(abs(a) ** 2 + abs(b) ** 2)
+    if norm < 1e-15:
+        return np.eye(2, dtype=complex)
+    a /= norm
+    b /= norm
+    return np.array([[a, b], [-b.conj(), a.conj()]], dtype=complex)
+
+
 def su2_dagger(U: np.ndarray) -> np.ndarray:
     """Hermitian conjugate (dagger) of a matrix."""
     return U.conj().T
@@ -62,6 +79,12 @@ class LatticeGauge:
     """
     def __init__(self, N: int, dim: int = 4, beta: float = 2.3,
                  seed: int = 42):
+        if N < 2:
+            raise ValueError(f"N must be >= 2, got {N}")
+        if dim < 2:
+            raise ValueError(f"dim must be >= 2, got {dim}")
+        if beta <= 0:
+            raise ValueError(f"beta must be > 0, got {beta}")
         self.N = N
         self.dim = dim
         self.beta = beta
@@ -229,6 +252,114 @@ class LatticeGauge:
             if verbose and (i + 1) % 10 == 0:
                 plaq = self.average_plaquette()
                 print(f"  Sweep {i+1}/{n_sweeps}: plaq={plaq:.4f}, acc={acc:.2%}")
+
+    def overrelaxation_sweep(self) -> None:
+        """
+        One microcanonical overrelaxation sweep over all links (Adler 1981).
+
+        For each link U[x,mu]: computes the staple sum S, projects to SU(2)
+        as V = S/|S|, then applies the exact reflection U' = V† · U† · V†.
+        This preserves the Wilson action exactly (100% acceptance) while
+        strongly decorrelating the configuration. Use 4-5 per Metropolis sweep.
+        """
+        for site in range(self.n_sites):
+            for mu in range(self.dim):
+                S = self.staple(site, mu)
+                norm_S = np.sqrt(abs(np.linalg.det(S)))
+                if not np.isfinite(norm_S) or norm_S < 1e-15:
+                    continue  # degenerate staple — skip
+                V = project_su2(S / norm_S)
+                V_dag = V.conj().T
+                U = self.get_link(site, mu)
+                # Re-project result to SU(2) to suppress floating-point drift
+                self.set_link(site, mu, project_su2(V_dag @ U.conj().T @ V_dag))
+
+    def mixed_sweep(self, n_over: int = 4, n_hits: int = 10,
+                    epsilon: float = 0.3) -> float:
+        """
+        n_over overrelaxation sweeps followed by one Metropolis sweep.
+
+        The standard ratio in lattice QCD is 4-5 overrelaxation per Metropolis.
+        Returns the Metropolis acceptance rate.
+        """
+        for _ in range(n_over):
+            self.overrelaxation_sweep()
+        return self.metropolis_sweep(n_hits=n_hits, epsilon=epsilon)
+
+    def adaptive_thermalize(
+        self,
+        target_acceptance: float = 0.5,
+        n_sweeps: int = 100,
+        epsilon_min: float = 0.05,
+        epsilon_max: float = 1.0,
+        adjust_every: int = 10,
+        verbose: bool = False,
+    ) -> dict:
+        """
+        Thermalize while auto-tuning epsilon to keep acceptance ~ target.
+
+        Every `adjust_every` sweeps the acceptance rate is measured and epsilon
+        is scaled up (if acc > target) or down (if acc < target) by 10%.
+        Uses mixed_sweep (overrelaxation + Metropolis) internally.
+
+        Returns
+        -------
+        dict with keys: final_epsilon, final_acceptance, plaquette_history
+        """
+        epsilon = 0.3
+        history = []
+        last_acc = target_acceptance
+        for i in range(n_sweeps):
+            acc = self.mixed_sweep(n_over=4, n_hits=10, epsilon=epsilon)
+            plaq = self.average_plaquette()
+            history.append(plaq)
+            if (i + 1) % adjust_every == 0:
+                last_acc = acc
+                if acc > target_acceptance:
+                    epsilon = min(epsilon * 1.1, epsilon_max)
+                else:
+                    epsilon = max(epsilon * 0.9, epsilon_min)
+                if verbose:
+                    print(f"  Sweep {i+1}/{n_sweeps}: plaq={plaq:.4f}, "
+                          f"acc={acc:.2%}, eps={epsilon:.4f}")
+        return {
+            "final_epsilon": epsilon,
+            "final_acceptance": last_acc,
+            "plaquette_history": history,
+        }
+
+    def measure_with_errors(
+        self,
+        observable_func: Callable,
+        n_configs: int = 100,
+        skip: int = 10,
+        n_bootstrap: int = 500,
+    ) -> tuple:
+        """
+        Collect n_configs measurements of observable_func separated by skip
+        mixed sweeps, then return (mean, bootstrap_error, tau_int).
+
+        Parameters
+        ----------
+        observable_func : callable that takes no arguments and returns float,
+                          e.g. self.average_plaquette
+        n_configs       : number of independent-ish measurements
+        skip            : mixed sweeps between measurements (use >= 2*tau_int)
+        n_bootstrap     : resamples for error estimation
+
+        Returns
+        -------
+        (mean, bootstrap_std, tau_int)
+        """
+        from statistics import bootstrap_error, integrated_autocorrelation_time
+        samples = []
+        for _ in range(n_configs):
+            self.mixed_sweep(n_over=4)
+            samples.append(observable_func())
+        samples = np.array(samples)
+        mean, err = bootstrap_error(samples, n_bootstrap=n_bootstrap, rng=self.rng)
+        tau = integrated_autocorrelation_time(samples)
+        return mean, err, tau
 
     def hot_start(self) -> None:
         """Initialize all links to random Haar SU(2) matrices. Vectorized."""
